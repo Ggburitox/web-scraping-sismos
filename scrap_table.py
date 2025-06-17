@@ -1,62 +1,41 @@
-from selenium import webdriver
-from selenium.webdriver.chrome.options import Options
-from selenium.webdriver.common.by import By
-from bs4 import BeautifulSoup
-import time
+import requests
 import boto3
 import uuid
+import json
 
-def lambda_handler(event=None, context=None):
-    chrome_options = Options()
-    chrome_options.add_argument("--headless")
-    chrome_options.add_argument("--no-sandbox")
-    chrome_options.add_argument("--disable-dev-shm-usage")
+def lambda_handler(event, context):
+    # URL del endpoint real que devuelve datos en JSON
+    url = "https://ultimosismo.igp.gob.pe/api/ultimo-sismo/ajaxb/2025"
 
-    # Inicializar el navegador
-    driver = webdriver.Chrome(options=chrome_options)
-    url = "https://ultimosismo.igp.gob.pe/ultimo-sismo/sismos-reportados"
-    driver.get(url)
-
-    # Esperar a que cargue la tabla (puedes ajustar el tiempo)
-    time.sleep(5)
-
-    # Obtener el HTML después de que la tabla esté visible
-    html = driver.page_source
-    driver.quit()
-
-    # Parsear con BeautifulSoup
-    soup = BeautifulSoup(html, 'html.parser')
-    table = soup.find('table')
-    if not table:
+    # Realizar la solicitud HTTP a la API
+    response = requests.get(url)
+    if response.status_code != 200:
         return {
-            'statusCode': 404,
-            'body': 'No se encontró la tabla en la página web'
+            'statusCode': response.status_code,
+            'body': 'Error al acceder a la página web'
         }
 
-    headers = [th.text.strip() for th in table.find_all('th')]
-    rows = []
-    for row in table.find_all('tr')[1:]:  # Omitir encabezado
-        cells = row.find_all('td')
-        if len(cells) == len(headers):
-            rows.append({
-                headers[i]: cell.text.strip() for i, cell in enumerate(cells)
-            })
+    datos = response.json()
+    ultimos = datos[-10:]  # Tomamos los últimos 10 sismos
+    ultimos.reverse()      # Para que estén en orden cronológico
 
-    # Guardar en DynamoDB
+    # Guardar los datos en DynamoDB
     dynamodb = boto3.resource('dynamodb')
-    table = dynamodb.Table('TablaWebScrapping-Sismos')
+    table = dynamodb.Table('TablaWebScrappingPropuesto')
 
+    # Eliminar todos los elementos actuales
     scan = table.scan()
     with table.batch_writer() as batch:
-        for item in scan.get('Items', []):
-            batch.delete_item(Key={'id': item['id']})
+        for each in scan['Items']:
+            batch.delete_item(Key={'id': each['id']})
 
-    for i, row in enumerate(rows, start=1):
+    # Insertar los nuevos datos
+    for i, row in enumerate(ultimos, start=1):
         row['#'] = i
         row['id'] = str(uuid.uuid4())
         table.put_item(Item=row)
 
     return {
         'statusCode': 200,
-        'body': rows
+        'body': json.dumps(ultimos)
     }
